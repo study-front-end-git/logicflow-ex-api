@@ -1,0 +1,24 @@
+{
+  "name": "logicflow-ex-api",
+  "version": "1.0.0",
+  "description": "Backend API for the LogicFlow example project",
+  "main": "serve.js",
+  "scripts": {
+    "start": "node serve.js",
+    "dev": "nodemon serve.js",
+    "db:init": "node scripts/init-db.js",
+    "test": "node --test"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "mysql2": "^3.24.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
+  }
+}

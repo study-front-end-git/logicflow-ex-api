@@ -1,0 +1,6 @@
+{
+  "watch": ["serve.js", "src"],
+  "ext": "js,json",
+  "ignore": ["test"],
+  "exec": "node serve.js"
+}
