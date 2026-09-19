@@ -1,3 +1,5 @@
+const { isDeepStrictEqual } = require('node:util')
+
 const HttpError = require('../utils/http-error')
 const { getValueAtPath } = require('../utils/value-path')
 const { callChatCompletion } = require('./llm-service')
@@ -33,10 +35,17 @@ function getExecutionOrder(nodes, edges) {
   return order
 }
 
-function resolveReference(value, results, nodeId) {
+function resolveReference(value, results, nodeId, options = {}) {
   const reference = value.referenceValue || value.referenceKey
   if (!Array.isArray(reference) || reference.length < 2) {
     throw new HttpError(400, `Node ${nodeId} has an invalid variable reference`, 'INVALID_VARIABLE_REFERENCE')
+  }
+
+  if (
+    options.allowSkippedReferences &&
+    options.executionStates?.get(reference[0]) === 'skipped'
+  ) {
+    return ''
   }
 
   const resolved = getValueAtPath(results.get(reference[0]), reference.slice(1))
@@ -46,11 +55,11 @@ function resolveReference(value, results, nodeId) {
   return resolved.value
 }
 
-function resolveParameters(parameters, inputs, results, nodeId) {
+function resolveParameters(parameters, inputs, results, nodeId, options = {}) {
   return (Array.isArray(parameters) ? parameters : []).reduce((output, parameter) => {
     if (!parameter.name) return output
     if (parameter.valueType === 'reference') {
-      output[parameter.name] = resolveReference(parameter, results, nodeId)
+      output[parameter.name] = resolveReference(parameter, results, nodeId, options)
     } else if (Object.prototype.hasOwnProperty.call(inputs, parameter.name)) {
       output[parameter.name] = inputs[parameter.name]
     } else if (parameter.inputValue !== undefined && parameter.inputValue !== '') {
@@ -62,6 +71,122 @@ function resolveParameters(parameters, inputs, results, nodeId) {
     }
     return output
   }, {})
+}
+
+function parseConditionInput(operand, nodeId) {
+  const value = operand?.inputValue
+  const type = operand?.type || 'String'
+
+  if (type === 'String') return value == null ? '' : String(value)
+  if (type === 'Number') {
+    const numberValue = Number(value)
+    if (value === '' || value === null || value === undefined || Number.isNaN(numberValue)) {
+      throw new HttpError(400, `IF/ELSE node ${nodeId} contains an invalid Number operand`, 'INVALID_IF_ELSE_OPERAND')
+    }
+    return numberValue
+  }
+  if (type === 'Boolean') {
+    if (value === true || String(value).toLowerCase() === 'true') return true
+    if (value === false || String(value).toLowerCase() === 'false') return false
+    throw new HttpError(400, `IF/ELSE node ${nodeId} contains an invalid Boolean operand`, 'INVALID_IF_ELSE_OPERAND')
+  }
+  if (type === 'Object' || type === 'Array') {
+    let parsedValue = value
+    try {
+      if (typeof value === 'string') parsedValue = JSON.parse(value)
+    } catch (error) {
+      throw new HttpError(400, `IF/ELSE node ${nodeId} contains invalid JSON`, 'INVALID_IF_ELSE_OPERAND')
+    }
+    const valid = type === 'Array'
+      ? Array.isArray(parsedValue)
+      : parsedValue !== null && typeof parsedValue === 'object' && !Array.isArray(parsedValue)
+    if (!valid) {
+      throw new HttpError(400, `IF/ELSE node ${nodeId} contains an invalid ${type} operand`, 'INVALID_IF_ELSE_OPERAND')
+    }
+    return parsedValue
+  }
+  return value
+}
+
+function resolveConditionOperand(operand, results, nodeId) {
+  return operand?.valueType === 'reference'
+    ? resolveReference(operand, results, nodeId)
+    : parseConditionInput(operand, nodeId)
+}
+
+function isEmptyValue(value) {
+  if (value === null || value === undefined || value === '') return true
+  if (Array.isArray(value)) return value.length === 0
+  return typeof value === 'object' && Object.keys(value).length === 0
+}
+
+function containsValue(left, right) {
+  if (typeof left === 'string') return left.includes(String(right))
+  if (Array.isArray(left)) return left.some((item) => isDeepStrictEqual(item, right))
+  if (left !== null && typeof left === 'object') {
+    return typeof right === 'string' && Object.prototype.hasOwnProperty.call(left, right)
+  }
+  return false
+}
+
+function evaluateCondition(condition, results, nodeId) {
+  const left = resolveConditionOperand(condition.left, results, nodeId)
+  const operator = condition.operator || 'equals'
+  if (operator === 'isEmpty') return isEmptyValue(left)
+  if (operator === 'isNotEmpty') return !isEmptyValue(left)
+
+  const right = resolveConditionOperand(condition.right, results, nodeId)
+  switch (operator) {
+    case 'equals': return isDeepStrictEqual(left, right)
+    case 'notEquals': return !isDeepStrictEqual(left, right)
+    case 'greaterThan': return left > right
+    case 'greaterThanOrEqual': return left >= right
+    case 'lessThan': return left < right
+    case 'lessThanOrEqual': return left <= right
+    case 'contains': return containsValue(left, right)
+    case 'notContains': return !containsValue(left, right)
+    default:
+      throw new HttpError(400, `IF/ELSE node ${nodeId} uses unsupported operator ${operator}`, 'INVALID_IF_ELSE_OPERATOR')
+  }
+}
+
+function evaluateIfElseNode(node, results) {
+  const config = node.properties?.config || {}
+  const conditions = (Array.isArray(config.conditions) ? config.conditions : [])
+    .filter((condition) => condition?.enabled !== false)
+  if (!conditions.length) {
+    throw new HttpError(400, `IF/ELSE node ${node.id} has no enabled conditions`, 'IF_ELSE_CONDITION_NOT_CONFIGURED')
+  }
+  if (!['and', 'or'].includes(config.logic || 'and')) {
+    throw new HttpError(400, `IF/ELSE node ${node.id} uses invalid condition logic`, 'INVALID_IF_ELSE_LOGIC')
+  }
+
+  const conditionResults = conditions.map((condition) => evaluateCondition(condition, results, node.id))
+  const matched = (config.logic || 'and') === 'or'
+    ? conditionResults.some(Boolean)
+    : conditionResults.every(Boolean)
+  return {
+    branch: matched ? 'if' : 'else',
+    conditionCount: conditions.length,
+    conditionResults,
+    logic: config.logic || 'and',
+    matched,
+  }
+}
+
+function getEdgeBranch(edge, sourceNodeId) {
+  const configuredBranch = edge.properties?.branchId || edge.properties?.branch
+  if (['if', 'true'].includes(configuredBranch)) return 'if'
+  if (['else', 'false'].includes(configuredBranch)) return 'else'
+  if (edge.sourceAnchorId === `${sourceNodeId}_1`) return 'if'
+  if (edge.sourceAnchorId === `${sourceNodeId}_2`) return 'else'
+  return null
+}
+
+function isIncomingEdgeActive(edge, executionStates, selectedBranches) {
+  if (executionStates.get(edge.sourceNodeId) !== 'executed') return false
+  const selectedBranch = selectedBranches.get(edge.sourceNodeId)
+  return !selectedBranch || getEdgeBranch(edge, edge.sourceNodeId) === selectedBranch
 }
 
 function stringifyValue(value) {
@@ -83,6 +208,26 @@ function interpolatePrompt(template, nodes, results, localValues) {
     }
   }
   return prompt
+}
+
+function executeOutputNode(node, nodes, inputs, results, executionStates) {
+  const properties = node.properties || {}
+  const values = resolveParameters(properties.data, inputs, results, node.id, {
+    allowSkippedReferences: true,
+    executionStates,
+  })
+  const hasTextTemplate = Boolean(
+    typeof properties.cueWord === 'string' && properties.cueWord.trim(),
+  )
+  const answer = hasTextTemplate
+    ? interpolatePrompt(properties.cueWord, nodes, results, values)
+    : ''
+
+  return {
+    values,
+    answer,
+    response: hasTextTemplate ? answer : values,
+  }
 }
 
 // function appendUnusedInputsToPrompt(userPrompt, systemPromptTemplate, userPromptTemplate, localValues) {
@@ -181,6 +326,7 @@ async function executeModelNode(node, nodes, inputs, results, invokeModel) {
 
   return {
     output,
+    finishReason: response.finishReason,
     usage: response.usage,
     model: response.model,
   }
@@ -245,17 +391,37 @@ async function runWorkflow(
   if (!nodes.some((node) => node.type === 'start-node')) {
     throw new HttpError(400, 'Workflow has no start node', 'START_NODE_NOT_FOUND')
   }
-  if (!nodes.some((node) => node.type === 'end-node')) {
-    throw new HttpError(400, 'Workflow has no end node', 'END_NODE_NOT_FOUND')
+  if (!nodes.some((node) => node.type === 'end-node' || node.type === 'output-node')) {
+    throw new HttpError(400, 'Workflow has no end or output node', 'END_NODE_NOT_FOUND')
   }
 
   const results = new Map()
+  const outputNodeResponses = new Map()
   const trace = []
-  for (const node of getExecutionOrder(nodes, edges)) {
+  const executionOrder = getExecutionOrder(nodes, edges)
+  const executionStates = new Map()
+  const selectedBranches = new Map()
+  for (const node of executionOrder) {
     const startedAt = Date.now()
     let output
     let metadata = {}
     const properties = node.properties || {}
+    const incomingEdges = edges.filter((edge) => edge.targetNodeId === node.id)
+
+    if (incomingEdges.length && !incomingEdges.some((edge) => (
+      isIncomingEdgeActive(edge, executionStates, selectedBranches)
+    ))) {
+      executionStates.set(node.id, 'skipped')
+      trace.push({
+        nodeId: node.id,
+        nodeType: node.type,
+        title: properties.title || properties.label || node.type,
+        status: 'skipped',
+        reason: 'inactive_branch',
+        durationMs: 0,
+      })
+      continue
+    }
 
     if (node.type === 'start-node' || node.type === 'input-node') {
       output = resolveParameters(properties.data, inputs, results, node.id)
@@ -264,18 +430,54 @@ async function runWorkflow(
       output = httpResult.output
       metadata = httpResult.metadata
     } else if (node.type === 'model-node') {
-      const modelResult = await executeModelNode(node, nodes, inputs, results, invokeModel)
+      let modelResult
+      try {
+        modelResult = await executeModelNode(node, nodes, inputs, results, invokeModel)
+      } catch (error) {
+        const nodeName = properties.title || properties.label || node.id
+        error.message = `Model node ${nodeName} failed: ${error.message}`
+        throw error
+      }
       output = modelResult.output
-      metadata = { model: modelResult.model, usage: modelResult.usage }
+      metadata = {
+        model: modelResult.model,
+        usage: modelResult.usage,
+        finishReason: modelResult.finishReason,
+        output: modelResult.output,
+      }
+    } else if (node.type === 'if-else-node') {
+      const conditionResult = evaluateIfElseNode(node, results)
+      const outgoingEdges = edges.filter((edge) => edge.sourceNodeId === node.id)
+      if (outgoingEdges.some((edge) => !getEdgeBranch(edge, node.id))) {
+        throw new HttpError(400, `IF/ELSE node ${node.id} has an edge without IF/ELSE branch information`, 'INVALID_IF_ELSE_BRANCH_EDGE')
+      }
+      if (!outgoingEdges.some((edge) => getEdgeBranch(edge, node.id) === conditionResult.branch)) {
+        throw new HttpError(400, `IF/ELSE node ${node.id} selected an unconnected ${conditionResult.branch.toUpperCase()} branch`, 'IF_ELSE_BRANCH_NOT_CONNECTED')
+      }
+      selectedBranches.set(node.id, conditionResult.branch)
+      output = {}
+      metadata = { condition: conditionResult }
+    } else if (node.type === 'output-node') {
+      const outputResult = executeOutputNode(node, nodes, inputs, results, executionStates)
+      output = outputResult.values
+      outputNodeResponses.set(node.id, outputResult.response)
+      metadata = {
+        output: outputResult.values,
+        answer: outputResult.answer,
+      }
     } else if (node.type === 'end-node') {
       output = properties.outputMode === 'text' || properties.isCustomReply
         ? interpolatePrompt(properties.cueWord, nodes, results, {})
-        : resolveParameters(properties.data, inputs, results, node.id)
+        : resolveParameters(properties.data, inputs, results, node.id, {
+          allowSkippedReferences: true,
+          executionStates,
+        })
     } else {
       throw new HttpError(400, `Unsupported node type: ${node.type}`, 'UNSUPPORTED_NODE_TYPE')
     }
 
     results.set(node.id, output)
+    executionStates.set(node.id, 'executed')
     trace.push({
       nodeId: node.id,
       nodeType: node.type,
@@ -285,9 +487,23 @@ async function runWorkflow(
     })
   }
 
-  const endNodes = nodes.filter((node) => node.type === 'end-node')
-  const output = results.get(endNodes[endNodes.length - 1].id)
+  const executedEndNodes = executionOrder.filter((node) => (
+    node.type === 'end-node' && executionStates.get(node.id) === 'executed'
+  ))
+  if (executedEndNodes.length) {
+    const finalEndNode = executedEndNodes[executedEndNodes.length - 1]
+    const output = results.get(finalEndNode.id)
+    return { output, trace }
+  }
+
+  const executedOutputNodes = executionOrder.filter((node) => (
+    node.type === 'output-node' && executionStates.get(node.id) === 'executed'
+  ))
+  if (!executedOutputNodes.length) {
+    throw new HttpError(400, 'No end or output node was reached by the active branch', 'NO_ACTIVE_END_NODE')
+  }
+  const output = outputNodeResponses.get(executedOutputNodes[executedOutputNodes.length - 1].id)
   return { output, trace }
 }
 
-module.exports = { getExecutionOrder, runWorkflow }
+module.exports = { evaluateIfElseNode, getExecutionOrder, runWorkflow }

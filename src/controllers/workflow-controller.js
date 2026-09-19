@@ -20,6 +20,24 @@ function getInputDefinitions(graphData) {
     })))
 }
 
+async function createWorkflow(req, res, next) {
+  try {
+    const workflow = await workflowService.createWorkflow(req.body)
+    res.status(201).json({ code: 0, message: 'Workflow created', data: workflow })
+  } catch (error) {
+    next(error)
+  }
+}
+
+async function deleteWorkflow(req, res, next) {
+  try {
+    const data = await workflowService.deleteWorkflow(req.params.workflowKey)
+    res.json({ code: 0, message: 'Workflow deleted', data })
+  } catch (error) {
+    next(error)
+  }
+}
+
 async function getWorkflow(req, res, next) {
   try {
     const workflow = await workflowService.getWorkflow(req.params.workflowKey)
@@ -29,10 +47,23 @@ async function getWorkflow(req, res, next) {
   }
 }
 
+async function listWorkflows(req, res, next) {
+  try {
+    const workflows = await workflowService.listWorkflows()
+    res.json({ code: 0, data: workflows })
+  } catch (error) {
+    next(error)
+  }
+}
+
 async function saveWorkflow(req, res, next) {
   try {
     const workflow = await workflowService.saveWorkflow(req.params.workflowKey, req.body)
-    res.json({ code: 0, message: 'Workflow saved', data: workflow })
+    res.json({
+      code: 0,
+      message: workflow.savedAsVersion ? 'Workflow version saved' : 'Workflow draft saved',
+      data: workflow,
+    })
   } catch (error) {
     next(error)
   }
@@ -195,11 +226,14 @@ async function getLatestHttpNodeTestRun(req, res, next) {
 }
 
 module.exports = {
+  createWorkflow,
+  deleteWorkflow,
   getWorkflow,
   getLatestWorkflowRun,
   getWorkflowRun,
   getWorkflowRunConfig,
   getLatestHttpNodeTestRun,
+  listWorkflows,
   listWorkflowRuns,
   runWorkflow,
   saveWorkflow,

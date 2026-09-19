@@ -46,3 +46,30 @@ test('PUT /api/workflows/:id rejects invalid graph data before accessing MySQL',
   assert.equal(response.status, 400)
   assert.equal(body.code, 'INVALID_GRAPH_DATA')
 })
+
+test('PUT /api/workflows/:id requires createVersion to be a boolean', async () => {
+  const response = await fetch(`${baseUrl}/api/workflows/workflow-1`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      graphData: { nodes: [], edges: [] },
+      createVersion: 'true',
+    }),
+  })
+  const body = await response.json()
+
+  assert.equal(response.status, 400)
+  assert.equal(body.code, 'INVALID_CREATE_VERSION')
+})
+
+test('POST /api/workflows requires a workflow name', async () => {
+  const response = await fetch(`${baseUrl}/api/workflows`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ description: 'missing name' }),
+  })
+  const body = await response.json()
+
+  assert.equal(response.status, 400)
+  assert.equal(body.code, 'WORKFLOW_NAME_REQUIRED')
+})

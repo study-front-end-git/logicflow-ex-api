@@ -200,3 +200,292 @@ test('runWorkflow executes an HTTP node and exposes its output to a model node',
     durationMs: 12,
   })
 })
+
+function createIfElseGraph(logic = 'and', conditions = []) {
+  return {
+    nodes: [
+      {
+        id: 'start',
+        type: 'start-node',
+        properties: { data: [{ name: 'score', required: true }] },
+      },
+      {
+        id: 'branch',
+        type: 'if-else-node',
+        properties: { title: 'Score branch', config: { logic, conditions } },
+      },
+      {
+        id: 'if-end',
+        type: 'end-node',
+        properties: { outputMode: 'text', cueWord: 'passed' },
+      },
+      {
+        id: 'else-end',
+        type: 'end-node',
+        properties: { outputMode: 'text', cueWord: 'failed' },
+      },
+    ],
+    edges: [
+      { id: 'e1', sourceNodeId: 'start', targetNodeId: 'branch' },
+      {
+        id: 'e2',
+        sourceNodeId: 'branch',
+        targetNodeId: 'if-end',
+        sourceAnchorId: 'branch_1',
+      },
+      {
+        id: 'e3',
+        sourceNodeId: 'branch',
+        targetNodeId: 'else-end',
+        sourceAnchorId: 'branch_2',
+      },
+    ],
+  }
+}
+
+const scoreCondition = {
+  enabled: true,
+  left: { valueType: 'reference', referenceValue: ['start', 'score'] },
+  operator: 'greaterThanOrEqual',
+  right: { valueType: 'input', type: 'Number', inputValue: '60' },
+}
+
+test('runWorkflow executes only the IF branch when conditions match', async () => {
+  const result = await runWorkflow(createIfElseGraph('and', [scoreCondition]), { score: 80 })
+
+  assert.equal(result.output, 'passed')
+  assert.equal(result.trace.find((item) => item.nodeId === 'branch').condition.branch, 'if')
+  assert.equal(result.trace.find((item) => item.nodeId === 'else-end').status, 'skipped')
+})
+
+test('runWorkflow executes only the ELSE branch when conditions do not match', async () => {
+  const result = await runWorkflow(createIfElseGraph('and', [scoreCondition]), { score: 40 })
+
+  assert.equal(result.output, 'failed')
+  assert.equal(result.trace.find((item) => item.nodeId === 'branch').condition.branch, 'else')
+  assert.equal(result.trace.find((item) => item.nodeId === 'if-end').status, 'skipped')
+})
+
+test('runWorkflow supports OR conditions and contains', async () => {
+  const conditions = [
+    scoreCondition,
+    {
+      enabled: true,
+      left: { valueType: 'input', type: 'String', inputValue: 'logicflow' },
+      operator: 'contains',
+      right: { valueType: 'input', type: 'String', inputValue: 'flow' },
+    },
+  ]
+  const result = await runWorkflow(createIfElseGraph('or', conditions), { score: 40 })
+
+  assert.equal(result.output, 'passed')
+  assert.deepEqual(
+    result.trace.find((item) => item.nodeId === 'branch').condition.conditionResults,
+    [false, true],
+  )
+})
+
+test('end node returns an empty string when it references a skipped branch node', async () => {
+  const branchGraph = {
+    nodes: [
+      {
+        id: 'start',
+        type: 'start-node',
+        properties: { data: [{ name: 'total', required: true }] },
+      },
+      {
+        id: 'branch',
+        type: 'if-else-node',
+        properties: {
+          config: {
+            logic: 'and',
+            conditions: [{
+              enabled: true,
+              left: { valueType: 'reference', referenceValue: ['start', 'total'] },
+              operator: 'greaterThan',
+              right: { valueType: 'input', type: 'Number', inputValue: '0' },
+            }],
+          },
+        },
+      },
+      {
+        id: 'model',
+        type: 'model-node',
+        properties: {
+          data: [],
+          config: { modelId: 'test-model', userPrompt: 'translate' },
+          output: [{ name: 'text' }],
+        },
+      },
+      {
+        id: 'end',
+        type: 'end-node',
+        properties: {
+          outputMode: 'variable',
+          data: [{ name: 'text', valueType: 'reference', referenceValue: ['model', 'text'] }],
+        },
+      },
+    ],
+    edges: [
+      { id: 'e1', sourceNodeId: 'start', targetNodeId: 'branch' },
+      { id: 'e2', sourceNodeId: 'branch', targetNodeId: 'model', sourceAnchorId: 'branch_1' },
+      { id: 'e3', sourceNodeId: 'branch', targetNodeId: 'end', sourceAnchorId: 'branch_2' },
+      { id: 'e4', sourceNodeId: 'model', targetNodeId: 'end' },
+    ],
+  }
+
+  let modelWasCalled = false
+  const result = await runWorkflow(branchGraph, { total: 0 }, async () => {
+    modelWasCalled = true
+    return { content: 'unexpected', model: 'test-model', usage: {} }
+  })
+
+  assert.equal(modelWasCalled, false)
+  assert.deepEqual(result.output, { text: '' })
+  assert.equal(result.trace.find((item) => item.nodeId === 'branch').condition.branch, 'else')
+  assert.equal(result.trace.find((item) => item.nodeId === 'model').status, 'skipped')
+})
+
+test('end node still rejects a missing variable from an executed node', async () => {
+  const invalidGraph = JSON.parse(JSON.stringify(graph))
+  const endNode = invalidGraph.nodes.find((node) => node.id === 'end')
+  endNode.properties.data[0].referenceValue = ['model', 'missing']
+
+  await assert.rejects(
+    runWorkflow(invalidGraph, { question: 'hello' }, async () => ({
+      content: 'world',
+      model: 'test-model',
+      usage: {},
+    })),
+    (error) => error.code === 'VARIABLE_NOT_FOUND',
+  )
+})
+
+test('runWorkflow keeps end-node output authoritative when an output node also runs', async () => {
+  const outputBranchGraph = {
+    nodes: [
+      {
+        id: 'start',
+        type: 'start-node',
+        properties: { data: [{ name: 'total', required: true }] },
+      },
+      {
+        id: 'branch',
+        type: 'if-else-node',
+        properties: {
+          config: {
+            logic: 'and',
+            conditions: [{
+              enabled: true,
+              left: { valueType: 'reference', referenceValue: ['start', 'total'] },
+              operator: 'greaterThan',
+              right: { valueType: 'input', type: 'Number', inputValue: '0' },
+            }],
+          },
+        },
+      },
+      {
+        id: 'model',
+        type: 'model-node',
+        properties: {
+          data: [],
+          config: { modelId: 'test-model', userPrompt: 'translate' },
+          output: [{ name: 'text' }],
+        },
+      },
+      {
+        id: 'fallback',
+        type: 'output-node',
+        properties: {
+          data: [{ name: 'output', valueType: 'input', inputValue: 'no response' }],
+          cueWord: '',
+        },
+      },
+      {
+        id: 'end',
+        type: 'end-node',
+        properties: {
+          outputMode: 'variable',
+          data: [{ name: 'text', valueType: 'reference', referenceValue: ['model', 'text'] }],
+        },
+      },
+    ],
+    edges: [
+      { id: 'e1', sourceNodeId: 'start', targetNodeId: 'branch' },
+      { id: 'e2', sourceNodeId: 'branch', targetNodeId: 'model', sourceAnchorId: 'branch_1' },
+      { id: 'e3', sourceNodeId: 'branch', targetNodeId: 'fallback', sourceAnchorId: 'branch_2' },
+      { id: 'e4', sourceNodeId: 'model', targetNodeId: 'end' },
+      { id: 'e5', sourceNodeId: 'fallback', targetNodeId: 'end' },
+    ],
+  }
+
+  let modelWasCalled = false
+  const result = await runWorkflow(outputBranchGraph, { total: 0 }, async () => {
+    modelWasCalled = true
+    return { content: 'unexpected', model: 'test-model', usage: {} }
+  })
+
+  assert.equal(modelWasCalled, false)
+  assert.deepEqual(result.output, { text: '' })
+  assert.deepEqual(result.trace.find((item) => item.nodeId === 'fallback').output, {
+    output: 'no response',
+  })
+  assert.equal(result.trace.find((item) => item.nodeId === 'fallback').answer, '')
+})
+
+test('end node returns its configured model reference after an output node executes', async () => {
+  const graphWithOutputNode = JSON.parse(JSON.stringify(graph))
+  const endNode = graphWithOutputNode.nodes.find((node) => node.id === 'end')
+  graphWithOutputNode.nodes.splice(graphWithOutputNode.nodes.length - 1, 0, {
+    id: 'output',
+    type: 'output-node',
+    properties: {
+      data: [{ name: 'fallback', valueType: 'input', inputValue: 'do not return this' }],
+      cueWord: '',
+    },
+  })
+  graphWithOutputNode.edges = [
+    { id: 'e1', sourceNodeId: 'start', targetNodeId: 'model' },
+    { id: 'e2', sourceNodeId: 'model', targetNodeId: 'output' },
+    { id: 'e3', sourceNodeId: 'output', targetNodeId: endNode.id },
+  ]
+
+  const result = await runWorkflow(graphWithOutputNode, { question: 'hello' }, async () => ({
+    content: 'model result',
+    model: 'test-model',
+    usage: {},
+  }))
+
+  assert.deepEqual(result.output, { answer: 'model result' })
+  assert.deepEqual(result.trace.find((item) => item.nodeId === 'output').output, {
+    fallback: 'do not return this',
+  })
+})
+
+test('runWorkflow renders output-node text and supports it as a terminal node', async () => {
+  const outputOnlyGraph = {
+    nodes: [
+      {
+        id: 'start',
+        type: 'start-node',
+        properties: { data: [{ name: 'name', required: true }] },
+      },
+      {
+        id: 'output',
+        type: 'output-node',
+        properties: {
+          data: [{ name: 'name', valueType: 'reference', referenceValue: ['start', 'name'] }],
+          cueWord: 'hello {{name}}',
+        },
+      },
+    ],
+    edges: [{ id: 'e1', sourceNodeId: 'start', targetNodeId: 'output' }],
+  }
+
+  const result = await runWorkflow(outputOnlyGraph, { name: 'LogicFlow' })
+
+  assert.equal(result.output, 'hello LogicFlow')
+  assert.equal(result.trace.at(-1).nodeType, 'output-node')
+  assert.deepEqual(result.trace.at(-1).output, { name: 'LogicFlow' })
+  assert.equal(result.trace.at(-1).answer, 'hello LogicFlow')
+})

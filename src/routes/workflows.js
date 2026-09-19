@@ -4,8 +4,11 @@ const workflowController = require('../controllers/workflow-controller')
 
 const router = express.Router()
 
+router.get('/', workflowController.listWorkflows)
+router.post('/', workflowController.createWorkflow)
 router.get('/:workflowKey', workflowController.getWorkflow)
 router.put('/:workflowKey', workflowController.saveWorkflow)
+router.delete('/:workflowKey', workflowController.deleteWorkflow)
 router.get('/:workflowKey/run-config', workflowController.getWorkflowRunConfig)
 router.post('/:workflowKey/run', workflowController.runWorkflow)
 router.post('/:workflowKey/http-nodes/test', workflowController.testHttpNode)
