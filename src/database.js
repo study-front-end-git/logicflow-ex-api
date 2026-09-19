@@ -13,6 +13,9 @@ const pool = mysql.createPool({
   queueLimit: 0,
   charset: 'utf8mb4',
   timezone: '+08:00',
+  ssl: process.env.DB_SSL === 'true'
+    ? { rejectUnauthorized: false }
+    : undefined
 })
 
 async function checkDatabaseConnection() {
