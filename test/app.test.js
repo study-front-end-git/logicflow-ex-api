@@ -27,6 +27,30 @@ test('GET /api/health returns the service status', async () => {
   assert.equal(body.data.status, 'ok')
 })
 
+test('CORS allows the configured frontend origin', async () => {
+  const response = await fetch(`${baseUrl}/api/health`, {
+    headers: { Origin: 'http://localhost:8080' },
+  })
+
+  assert.equal(response.status, 200)
+  assert.equal(response.headers.get('access-control-allow-origin'), 'http://localhost:8080')
+})
+
+test('CORS handles preflight requests', async () => {
+  const response = await fetch(`${baseUrl}/api/workflows`, {
+    method: 'OPTIONS',
+    headers: {
+      Origin: 'http://localhost:8080',
+      'Access-Control-Request-Method': 'POST',
+      'Access-Control-Request-Headers': 'content-type',
+    },
+  })
+
+  assert.equal(response.status, 204)
+  assert.match(response.headers.get('access-control-allow-methods'), /POST/)
+  assert.match(response.headers.get('access-control-allow-headers'), /Content-Type/i)
+})
+
 test('unknown routes return a JSON 404 response', async () => {
   const response = await fetch(`${baseUrl}/missing`)
   const body = await response.json()

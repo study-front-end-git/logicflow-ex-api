@@ -2,6 +2,10 @@ require('dotenv').config()
 
 const port = Number.parseInt(process.env.PORT || '3000', 10)
 const dbPort = Number.parseInt(process.env.DB_PORT || '3306', 10)
+const corsOrigins = (process.env.CORS_ORIGIN || 'http://localhost:8080')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean)
 
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
   throw new Error('PORT must be an integer between 1 and 65535')
@@ -10,6 +14,10 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) {
 module.exports = {
   nodeEnv: process.env.NODE_ENV || 'development',
   port,
+  cors: {
+    origins: corsOrigins,
+    credentials: process.env.CORS_CREDENTIALS === 'true',
+  },
   database: {
     host: process.env.DB_HOST || '127.0.0.1',
     port: dbPort,
